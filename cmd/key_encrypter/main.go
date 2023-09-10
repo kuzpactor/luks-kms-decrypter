@@ -27,12 +27,12 @@ func parseFlags(conf *config) {
 		&conf.KeyPath,
 		"key",
 		keypath,
-		"Location of key file")
+		"Location of key file (input)")
 	flag.StringVar(
 		&conf.KeyPathEncrypted,
 		"encrypted-key",
 		encryptedKeypath,
-		"Location of encrypted key file")
+		"Location of encrypted key file (output)")
 	flag.StringVar(
 		&conf.KMSKeyID,
 		"kmsid",

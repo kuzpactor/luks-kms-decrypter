@@ -43,14 +43,16 @@ func daemonize() error {
 	if err != nil {
 		return fmt.Errorf("unable to chdir(): %s", err)
 	}
-	devnull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
+	devnull, err := os.OpenFile("/dev/null", os.O_RDWR|os.O_APPEND, 0)
 	if err != nil {
 		return fmt.Errorf("unable to open devnull: %s", err)
 	}
 	fd := devnull.Fd()
 	syscall.Dup2(int(fd), int(os.Stdin.Fd()))
 	syscall.Dup2(int(fd), int(os.Stdout.Fd()))
-	syscall.Dup2(int(fd), int(os.Stderr.Fd()))
+	// Traditional daemon would also close stderr, but leaving it open is the only (ugly) way I could figure out
+	// to send messages when forked. No syscall socket is available, as we are in the early boot.
+	// syscall.Dup2(int(fd), int(os.Stderr.Fd()))
 	return nil
 }
 
@@ -114,38 +116,40 @@ func main() {
 		log.Fatalf("unable to decrypt key: %s", err)
 	}
 	plaintextKey := response.Plaintext
+	// Daemonize (Parent exits normally at this time)
 	if err := daemonize(); err != nil {
 		log.Fatal(err)
 	}
-	// Open socket
-	socket, err := net.Listen("unix", conf.SocketPath)
+	err = openAndServeOnce(plaintextKey, conf)
 	if err != nil {
-		log.Fatalf("unable to open socket: %s", err)
+		log.Fatal(err)
 	}
-	defer cleanup(socket, conf.SocketPath)
-	// Daemonize (Parent exits normally at this time)
-	for {
-		// Start accepting connections
-		conn, err := socket.Accept()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		// Handle the connection in a separate goroutine.
-		go func(conn net.Conn) {
-			defer conn.Close()
-			// Write decrypted key when there is connection
-			_, err = conn.Write(plaintextKey)
-			if err != nil {
-				log.Fatal(err)
-			}
-			os.Exit(0)
-		}(conn)
-	}
-	// When connection is done, exit normally
 }
 
-func cleanup(sock net.Listener, path string) {
-	sock.Close()
-	os.Remove(path)
+// openAndServeOnce opens the socket and feeds the key into it upon an established connection
+func openAndServeOnce(plaintextKey []byte, conf *config) error {
+	// Open socket
+	_ = os.Remove(conf.SocketPath)
+	socket, err := net.Listen("unix", conf.SocketPath)
+	if err != nil {
+		return fmt.Errorf("unable to open socket: %s", err)
+	}
+	defer cleanup(socket, conf.SocketPath)
+	// Start accepting connections
+	conn, err := socket.Accept()
+	if err != nil {
+		return fmt.Errorf("unable to open '%s': %s", conf.SocketPath, err)
+	}
+	// Write decrypted key when there is connection
+	_, err = conn.Write(plaintextKey)
+	if err != nil {
+		return fmt.Errorf("unable to write to socket: %s", err)
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func cleanup(sock net.Listener, sockPath string) {
+	_ = sock.Close()
+	_ = os.Remove(sockPath)
 }
