@@ -16,8 +16,10 @@ import (
 )
 
 const (
-	apiEndpoint = "api.il.nebius.cloud:443"
-	keyLength   = 2048
+	apiEndpoint         = "api.il.nebius.cloud:443"
+	keyLength           = 2048
+	aadMetadataKey      = "kms-aad"
+	kmsKeyIdMetadataKey = "kms-key-id"
 )
 
 type config struct {
@@ -25,6 +27,7 @@ type config struct {
 	KeyPathEncrypted string
 	KMSKeyID         string
 	ForceOverwrite   bool
+	KeyAAD           string
 }
 
 func parseFlags(conf *config) {
@@ -38,12 +41,16 @@ func parseFlags(conf *config) {
 		"encrypted-key",
 		"",
 		"Location of encrypted key file (output)")
+	flag.StringVar(
+		&conf.KeyAAD,
+		"key-aad",
+		"",
+		"Additional encryption context for KMS")
 	flag.BoolVar(
 		&conf.ForceOverwrite,
 		"force-key-overwrite",
 		false,
-		"Forces key overwrite even if the file is already present in the destination",
-	)
+		"Forces key overwrite even if the file is already present in the destination")
 	flag.StringVar(
 		&conf.KMSKeyID,
 		"kmsid",
@@ -52,13 +59,37 @@ func parseFlags(conf *config) {
 	flag.Parse()
 }
 
+func getKeyAAD(keyAAD string) (string, error) {
+	var attrNotDefined metadata.NotDefinedError
+	// If there is a key id set already, do nothing
+	if keyAAD != "" {
+		return keyAAD, nil
+	}
+	// Set KMS key from meta: either special-purpose key or use instanceId
+	keyAAD, err := metadata.InstanceAttributeValue(aadMetadataKey)
+	if errors.As(err, &attrNotDefined) {
+		keyAAD, err = metadata.InstanceID()
+		if err != nil {
+			return "", err
+		}
+		return keyAAD, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("cannot probe metadata for kms-aad: %s", err)
+	}
+	if keyAAD == "" {
+		return "", fmt.Errorf("empty aad context key")
+	}
+	return keyAAD, nil
+}
+
 func getKMSKey(keyID string) (string, error) {
 	// If there is a key id set already, do nothing
 	if keyID != "" {
 		return keyID, nil
 	}
 	// Set KMS key from meta
-	keyID, err := metadata.InstanceAttributeValue("kms-key-id")
+	keyID, err := metadata.InstanceAttributeValue(kmsKeyIdMetadataKey)
 	if err != nil {
 		return "", fmt.Errorf("cannot probe metadata for kms-key-id: %s", err)
 	}
@@ -143,9 +174,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	instanceId, err := metadata.InstanceID()
+	aadContext, err := getKeyAAD(conf.KeyAAD)
 	if err != nil {
-		log.Fatalf("unable to get instance ID: %s", err)
+		log.Fatal(err)
 	}
 
 	// Request decryption
@@ -160,7 +191,7 @@ func main() {
 	response, err := sdk.KMSCrypto().SymmetricCrypto().Encrypt(ctx, &kms.SymmetricEncryptRequest{
 		KeyId:      kmsKeyID,
 		Plaintext:  keyBytes,
-		AadContext: []byte(instanceId),
+		AadContext: []byte(aadContext),
 	})
 	if err != nil {
 		log.Fatalf("unable to encrypt key: %s", err)
